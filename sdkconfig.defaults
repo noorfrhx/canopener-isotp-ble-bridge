@@ -1,0 +1,31 @@
+# CAN Opener SE: ESP32-C5-WROOM-1-N16R8 (16 MB flash, 8 MB PSRAM)
+CONFIG_IDF_TARGET="esp32c5"
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+CONFIG_PARTITION_TABLE_SINGLE_APP_LARGE=y
+CONFIG_COMPILER_OPTIMIZATION_PERF=y
+
+# Console on the native USB port, so UART0 stays free for the bridge's wired protocol
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+# Original firmware compiled logging out; WARN keeps the flash path quiet.
+# For a debug build change this to CONFIG_LOG_DEFAULT_LEVEL_INFO=y
+CONFIG_LOG_DEFAULT_LEVEL_WARN=y
+
+# Bluetooth LE via Bluedroid, GATT server, legacy (4.2) advertising APIs as used by ble_server.c
+CONFIG_BT_ENABLED=y
+CONFIG_BT_BLUEDROID_ENABLED=y
+CONFIG_BT_BLE_ENABLED=y
+CONFIG_BT_GATTS_ENABLE=y
+CONFIG_BT_BLE_42_FEATURES_SUPPORTED=y
+# CONFIG_BT_BLE_50_FEATURES_SUPPORTED is not set
+CONFIG_BT_BLE_SMP_ENABLE=y
+CONFIG_BT_STACK_NO_LOG=y
+CONFIG_BT_BTC_TASK_STACK_SIZE=3072
+CONFIG_BT_BTU_TASK_STACK_SIZE=4096
+
+# Matches the original firmware
+CONFIG_PM_ENABLE=y
+CONFIG_ESP_TASK_WDT_EN=y
+CONFIG_ESP_TASK_WDT_INIT=y
+CONFIG_ESP_TASK_WDT_TIMEOUT_S=5
+# 250 Hz like the original: ble_server.c uses app-set BLE delays as raw tick counts
+CONFIG_FREERTOS_HZ=250
