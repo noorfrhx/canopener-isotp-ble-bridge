@@ -1,14 +1,18 @@
-# CAN Opener SE: ESP32-C5-WROOM-1-N16R8 (16 MB flash, 8 MB PSRAM)
+# CAN Opener SE: ESP32-C5-WROOM-1 (Rev.B docs say N16R8; earlier units are N8R8).
+# Build for 8 MB so the same image runs on both; the app needs under 1.5 MB.
 CONFIG_IDF_TARGET="esp32c5"
-CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y
 CONFIG_PARTITION_TABLE_SINGLE_APP_LARGE=y
 CONFIG_COMPILER_OPTIMIZATION_PERF=y
 
-# Console on the native USB port, so UART0 stays free for the bridge's wired protocol
-CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
-# Original firmware compiled logging out; WARN keeps the flash path quiet.
-# For a debug build change this to CONFIG_LOG_DEFAULT_LEVEL_INFO=y
-CONFIG_LOG_DEFAULT_LEVEL_WARN=y
+# The USB-C port (USB Serial/JTAG) carries the binary wired protocol for
+# VW_Flash, so nothing else may print to it: no console, no app logs, no
+# bootloader logs. The ROM still prints a boot banner after a reset; that can
+# only be turned off by burning an eFuse, which we don't do.
+CONFIG_ESP_CONSOLE_NONE=y
+CONFIG_ESP_CONSOLE_SECONDARY_NONE=y
+CONFIG_LOG_DEFAULT_LEVEL_NONE=y
+CONFIG_BOOTLOADER_LOG_LEVEL_NONE=y
 
 # Bluetooth LE via Bluedroid, GATT server, legacy (4.2) advertising APIs as used by ble_server.c
 CONFIG_BT_ENABLED=y

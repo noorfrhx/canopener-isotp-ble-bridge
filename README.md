@@ -1,15 +1,15 @@
-# ISO-TP BLE bridge for the CAN Opener SE
+# ISO-TP bridge for the CAN Opener SE
 
 A port of [Switchleg1/esp32-isotp-ble-bridge](https://github.com/Switchleg1/esp32-isotp-ble-bridge) (branch `BridgeLEG`, itself a fork of bri3d's original) from the Macchina A0 (ESP32) to the **CAN Opener SE** (ESP32-C5).
 
-It turns the CAN Opener into a Bluetooth LE to ISO-TP adapter that works with:
+It turns the CAN Opener into an ISO-TP adapter for:
 
-- **SimosTools** (Android): flashing and logging for Simos 18 ECUs and DSG gearboxes
-- **VW_Flash** (Python, Mac/PC): use its BLE interface
+- **VW_Flash** (Python, Mac/Linux/Windows) over **USB-C**: `--interface USBISOTP --usb_name /dev/cu.usbmodem…`. VW_Flash has had no Bluetooth support since 2023.
+- **SimosTools** (Android) over **Bluetooth LE**. The bridge advertises as `BLE_TO_ISOTP20`.
 
-The bridge has preset links for the ECU (0x7E0/0x7E8), TCU (0x7E1/0x7E9), Haldex (0x7E5/0x7ED) and the broadcast DTC address. It advertises as `BLE_TO_ISOTP20`.
+The bridge has preset links for the ECU (0x7E0/0x7E8), TCU (0x7E1/0x7E9), Haldex (0x7E5/0x7ED) and the broadcast DTC address.
 
-> **Status: compiles, not yet tested on hardware.** Nobody has run this on a real CAN Opener SE or a car yet. Test it on the bench or with read-only operations (logging, reading part numbers) before you flash anything.
+> **Status: desk-tested, not yet tested on a car.** On a real CAN Opener SE: VW_Flash connects over USB-C, 15/15 port open/close cycles without a reset, 4103-byte flash-sized packets are handled, and failed CAN sends are reported cleanly. Nothing has been sent to a real ECU yet, and flash-sized transfers haven't been tested on a live CAN bus. Bench-test against a second CAN adapter, then do read-only work on a car, before you flash anything.
 
 ## What changed from the A0 version
 
@@ -17,14 +17,18 @@ The bridge has preset links for the ECU (0x7E0/0x7E8), TCU (0x7E1/0x7E9), Haldex
 |---|---|---|
 | Chip | ESP32 (Xtensa, dual core) | ESP32-C5 (RISC-V, single core) |
 | CAN driver | legacy `driver/twai.h` | new `esp_twai` node API (the C5 has TWAI-FD controllers, which the legacy driver does not support). See `main/twai.c` |
+| CAN send | blocking, one frame at a time | same: `twai_send()` waits for the frame to leave and reports failures back to ISO-TP |
 | CAN pins | TX 5 / RX 4 | TX 1 / RX 0 (CAN 1, OBD-II pins 6/14) |
 | Transceiver control | "S" pin on GPIO 21, low | TCAN3414 STB on GPIO 3, low |
+| Wired host link | UART0 via the A0's USB-serial chip | the C5's native USB Serial/JTAG, which is the USB-C port (`BOARD_WIRED_LINK_USB_SERIAL_JTAG` in `main/board.h`) |
+| Console and logs | off | off (console, app and bootloader), so nothing else is ever written to the USB-C link |
+| Bluetooth while USB is in use | stays available | turned off after the first USB packet, until power-cycle |
+| ISO-TP response timeout | 100 ms, 1 flow-control wait | 1000 ms (ISO 15765-2), 10 waits |
+| STmin | host override replaces the ECU's value | the larger of the host override and the ECU's value |
 | Status LED | WS2812 on GPIO 2 via legacy RMT, power enable on GPIO 13 | WS2812 on GPIO 2 via the `espressif/led_strip` component, no enable pin |
 | ESP-IDF | 4.3 | 5.5 |
-| Console | UART0 | USB Serial/JTAG (keeps UART0 free) |
-| Logging | off | warnings only |
 
-The pin map is in `main/board.h`. The ISO-TP, BLE protocol and persist/logging code are unchanged, apart from compile fixes for newer GCC (header globals made `extern`, uninitialized struct warnings, missing includes).
+The pin map is in `main/board.h`. The rest of the ISO-TP and BridgeLEG protocol code is as upstream, apart from compile fixes for newer GCC and the Bluetooth buffer bounds fix.
 
 ## Build
 
@@ -38,30 +42,30 @@ ESP-IDF can't build from a path with spaces, so the script copies the project to
 
 ## Flash
 
-Plug the CAN Opener into your computer over USB-C (not into the car), then:
+Plug the CAN Opener into your computer over USB-C (not into the car). To flash the files in `dist/`:
 
 ```bash
-./build.sh flash
+esptool.py --chip esp32c5 write_flash --flash_mode dio --flash_freq 80m --flash_size 8MB 0x2000 dist/bootloader.bin 0x8000 dist/partition-table.bin 0x10000 dist/canopener_isotp_bridge.bin
 ```
 
-If the port isn't found, hold **BOOT**, tap **RESET**, release BOOT and try again. To flash the prebuilt files in `dist/` without building:
+If the port isn't found, hold **BOOT**, tap **RESET**, release BOOT and try again.
+
+This replaces the stock CAN Opener firmware. Back up the device first (`esptool.py read_flash 0 0x800000 backup.bin`). To go back to stock, write that backup back, or use https://dev.canopener.io/flash (model CO-SE-NEXUS).
+
+## Using it with VW_Flash
 
 ```bash
-esptool.py --chip esp32c5 write_flash --flash_mode dio --flash_freq 80m --flash_size 16MB 0x2000 dist/bootloader.bin 0x8000 dist/partition-table.bin 0x10000 dist/canopener_isotp_bridge.bin
+uv run VW_Flash.py --interface USBISOTP --usb_name /dev/cu.usbmodem101 --action get_ecu_info
 ```
 
-This replaces the stock CAN Opener firmware. To go back to stock, use https://dev.canopener.io/flash (model CO-SE-NEXUS).
-
-## First test on the device
-
-1. Flash it with USB plugged in. The LED should turn dim red and the bridge should show up over Bluetooth as `BLE_TO_ISOTP20`. Release builds only log warnings; for startup logs, set `CONFIG_LOG_DEFAULT_LEVEL_INFO=y` in `sdkconfig.defaults`, run `./build.sh flash` and look for `TWAI: Driver installed (500000 bit/s)`.
-2. Plug it into the car (ignition on, engine off). Connect from SimosTools or VW_Flash and read ECU info: part number, software version, VIN.
-3. Only after reads work reliably, think about flashing. Keep a battery charger on the car the whole time you flash.
+- On macOS, VW_Flash opens the port with DTR and RTS high, which doesn't reset the chip. Opening the port with DTR and RTS low does reset it, so don't open the port with other serial tools during a session.
+- The chip's ROM still prints a short boot banner after any reset. Turning that off needs an eFuse burn, which this project doesn't do.
+- VW_Flash's DQ381 mode sends an adapter setting (`0x9`) that this bridge doesn't implement. Don't flash a DQ381 gearbox with it.
 
 ## Known gaps
 
-- **Untested on hardware.** In particular, the TX path keeps a small ring of frames for the new driver (`twai.c`), and bus-off recovery hasn't been tested on a live bus.
-- **Bus-off mid-transfer:** frames already in the controller when the bus goes off are lost (logged as "failed to send"), and frames still queued go out after recovery. The ECU will then reject that ISO-TP transfer. The legacy firmware also lost frames here; either way, a bus-off during a flash means retrying that step.
-- **Frame spacing:** up to 32 frames can be queued in the driver, so on a busy bus consecutive frames may go out closer together than the ISO-TP STmin asked for. The diagnostic CAN on the OBD port is normally quiet.
-- **Wired (UART) mode** still uses UART0. On the SE, the USB-C port is most likely the C5's native USB, so the wired protocol isn't reachable over USB-C yet. BLE is the supported path.
+- **Not tested on a car or a live CAN bus with flash-sized transfers.**
+- **Single core:** the ISO-TP processing task polls at a higher priority than the USB tasks during multi-frame transfers. Fine at the desk; it hasn't been measured under a real flash.
+- **Bluetooth has no authentication.** If a phone connects before the first USB packet, the bridge sends everything to the phone instead. Unplug the bridge when you're not using it.
+- **DQ381 adapter setting** (`0x9`) not implemented.
 - **CAN 2** (OBD-II pins 3/11) is not used.

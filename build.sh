@@ -2,8 +2,8 @@
 # Build (and optionally flash) the CAN Opener SE ISO-TP bridge.
 # ESP-IDF cannot build from a path that contains spaces, so this copies the
 # project to a space-free build directory first.
-#   ./build.sh            build only
-#   ./build.sh flash      build and flash over USB-C, then open the serial monitor
+#   ./build.sh            build only (to flash, use tools/flash-bridge.sh in the workbench,
+#                         which checks the device and asks for confirmation)
 set -e
 SRC="$(cd "$(dirname "$0")" && pwd)"
 OUT="${CANOPENER_BUILD_DIR:-$HOME/.cache/canopener-bridge}"
@@ -19,6 +19,3 @@ idf.py -DIDF_TARGET=esp32c5 build
 mkdir -p "$SRC/dist"
 cp build/canopener_isotp_bridge.bin build/bootloader/bootloader.bin build/partition_table/partition-table.bin "$SRC/dist/"
 echo "Firmware copied to $SRC/dist"
-if [ "$1" = "flash" ]; then
-  idf.py flash monitor
-fi

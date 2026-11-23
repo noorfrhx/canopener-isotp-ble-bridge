@@ -73,6 +73,7 @@ typedef int16_t							bool16;
 #define UART_BAUD_RATE     				250000 //250000 //115200
 #define UART_BUFFER_SIZE				8192
 #define UART_INTERNAL_BUFFER_SIZE		2048
+#define USB_LINK_RING_BUFFER_SIZE		8192
 //#define UART_ECHO
 
 #define PERSIST_COUNT					2

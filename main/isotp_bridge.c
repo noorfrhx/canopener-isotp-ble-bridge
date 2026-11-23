@@ -47,11 +47,12 @@ void	isotp_set_run_tasks(bool16 allow);
 
 int isotp_user_send_can(const uint32_t arbitration_id, const uint8_t* data, const uint16_t size)
 {
-    twai_message_t frame = {.identifier = arbitration_id, .data_length_code = size};
-    memcpy(frame.data, data, sizeof(frame.data));
-	twai_send(&frame);
+    twai_message_t frame = {.identifier = arbitration_id, .data_length_code = size > 8 ? 8 : size};
+    memcpy(frame.data, data, frame.data_length_code);
 
-    return ISOTP_RET_OK;                           
+    // Report a failed frame so the ISO-TP layer aborts the transfer instead of
+    // carrying on with a gap in the consecutive-frame sequence.
+    return twai_send(&frame) == ESP_OK ? ISOTP_RET_OK : ISOTP_RET_ERROR;
 }
 
 uint64_t isotp_user_get_us()
@@ -219,7 +220,18 @@ static void isotp_send_queue_task(void *arg)
 								msg.rxID == isotp_link_container->link.send_arbitration_id) {
 								ESP_LOGD(BRIDGE_TAG, "container match [%d]", i);
 								isotp_link_container_id = i;
-								isotp_send(&isotp_link_container->link, msg.buffer, msg.msg_length);
+								// isotp_send() rejects a new message while a multi-frame
+								// send is still running. Wait for it (bounded) rather than
+								// silently dropping this request.
+								for (int w = 0; w < 400 && isotp_link_container->link.send_status == ISOTP_SEND_STATUS_INPROGRESS; w++) {
+									rMUTEX(isotp_link_container->data_mutex);
+									vTaskDelay(1);
+									esp_task_wdt_reset();
+									tMUTEX(isotp_link_container->data_mutex);
+								}
+								int send_ret = isotp_send(&isotp_link_container->link, msg.buffer, msg.msg_length);
+								if (send_ret != ISOTP_RET_OK)
+									ESP_LOGW(BRIDGE_TAG, "isotp_send failed: %d", send_ret);
 								xSemaphoreGive(isotp_link_container->wait_for_isotp_data_sem);
 								found_container = true;
 							}

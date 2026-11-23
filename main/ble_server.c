@@ -310,12 +310,15 @@ static void free_write_buffer(void)
 static void send_buffered_message(void)
 {
     temp_spp_recv_data_node_p1 = SppRecvDataBuff.first_node;
-    uint8_t buf[4096];
+    // Static: this runs in the Bluetooth task, whose stack is smaller than 4 KB.
+    static uint8_t buf[4096];
     uint32_t recv_len = 0;
 
     while(temp_spp_recv_data_node_p1 != NULL){
-        if(recv_len > sizeof(buf)) {
-            continue;
+        // Drop the whole write if it doesn't fit, instead of overflowing buf.
+        if(recv_len + temp_spp_recv_data_node_p1->len > sizeof(buf)) {
+            ESP_LOGW(BLE_TAG, "prepared write too large, dropped");
+            return;
         }
         memcpy(buf + recv_len, (char *)(temp_spp_recv_data_node_p1->node_buff), temp_spp_recv_data_node_p1->len);
         recv_len += temp_spp_recv_data_node_p1->len;
@@ -872,7 +875,11 @@ void ble_stop_advertising()
         allow_connection = false;
     rMUTEX(ble_settings_mutex);
 
-    ESP_ERROR_CHECK(esp_ble_gap_stop_advertising());
+    // Not fatal: this runs when the first USB packet arrives, possibly before
+    // advertising has started. A reboot here would cut off the host.
+    esp_err_t err = esp_ble_gap_stop_advertising();
+    if (err != ESP_OK)
+        ESP_LOGW(BLE_TAG, "stop advertising: %s", esp_err_to_name(err));
 }
 
 void ble_start_advertising()
@@ -881,5 +888,7 @@ void ble_start_advertising()
         allow_connection = true;
     rMUTEX(ble_settings_mutex);
 
-    ESP_ERROR_CHECK(esp_ble_gap_start_advertising(&spp_adv_params));
+    esp_err_t err = esp_ble_gap_start_advertising(&spp_adv_params);
+    if (err != ESP_OK)
+        ESP_LOGW(BLE_TAG, "start advertising: %s", esp_err_to_name(err));
 }

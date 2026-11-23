@@ -20,9 +20,13 @@
 
 #define TWAI_TAG 			"TWAI"
 
-// Number of frames that may be queued in the driver at once. Each slot owns
-// its frame + data buffer until the driver reports the frame as sent.
-#define TWAI_TX_SLOTS		32
+// Frames go out one at a time: twai_send() waits until the controller reports
+// the frame as sent before returning, like the legacy driver with
+// tx_queue_len = 0 that BridgeLEG used. This keeps ISO-TP STmin spacing
+// measured from the real wire time and lets a failed frame be reported back
+// to the ISO-TP layer instead of being silently dropped.
+#define TWAI_TX_TIMEOUT_MS		100	// one frame takes ~0.25 ms at 500 kbit/s
+#define TWAI_TX_GATE_TIMEOUT_MS	500	// max wait for bus-off recovery before failing a send
 
 typedef enum {
 	TWAI_EVT_STATE,
@@ -42,10 +46,11 @@ typedef struct {
 static twai_node_handle_t			twai_node				= NULL;
 static QueueHandle_t				twai_rx_queue			= NULL;
 static QueueHandle_t				twai_evt_queue			= NULL;
-static SemaphoreHandle_t			twai_tx_slots_sem		= NULL;
+static SemaphoreHandle_t			twai_tx_done_sem		= NULL;
+static volatile bool				twai_tx_pending			= false;
+static volatile bool				twai_tx_last_ok			= false;
 static SemaphoreHandle_t			twai_tx_mutex			= NULL;
-static twai_tx_slot_t				twai_tx_slots[TWAI_TX_SLOTS];
-static uint16_t						twai_tx_slot_next		= 0;
+static twai_tx_slot_t				twai_tx_slot;
 static SemaphoreHandle_t			twai_receive_task_mutex = NULL;
 static SemaphoreHandle_t			twai_alert_task_mutex	= NULL;
 static SemaphoreHandle_t			twai_bus_off_mutex		= NULL;
@@ -104,10 +109,11 @@ static IRAM_ATTR bool twai_on_tx_done(twai_node_handle_t handle, const twai_tx_d
 {
 	// Frames in the hardware buffers complete as failed when the node goes
 	// bus-off. Count them so the alert task can report the loss.
+	twai_tx_last_ok = edata->is_tx_success;
 	if (!edata->is_tx_success)
 		twai_tx_fail_count++;
 	BaseType_t woken = pdFALSE;
-	xSemaphoreGiveFromISR(twai_tx_slots_sem, &woken);
+	xSemaphoreGiveFromISR(twai_tx_done_sem, &woken);
 	return woken == pdTRUE;
 }
 
@@ -174,8 +180,8 @@ static void twai_driver_install()
 {
 	twai_rx_queue		= xQueueCreate(CAN_INTERNAL_BUFFER_SIZE, sizeof(twai_message_t));
 	twai_evt_queue		= xQueueCreate(16, sizeof(twai_evt_t));
-	twai_tx_slots_sem	= xSemaphoreCreateCounting(TWAI_TX_SLOTS, TWAI_TX_SLOTS);
-	twai_tx_slot_next	= 0;
+	twai_tx_done_sem	= xSemaphoreCreateBinary();
+	twai_tx_pending		= false;
 
 	twai_onchip_node_config_t node_config = {
 		.io_cfg = {
@@ -188,7 +194,7 @@ static void twai_driver_install()
 			.bitrate = CAN_BITRATE,
 		},
 		.fail_retry_cnt = -1,		// retransmit until acked, like the legacy driver
-		.tx_queue_depth = TWAI_TX_SLOTS,
+		.tx_queue_depth = 1,
 		.intr_priority = 1,
 	};
 	ESP_ERROR_CHECK(twai_new_node_onchip(&node_config, &twai_node));
@@ -239,9 +245,9 @@ static void twai_driver_uninstall()
 		vQueueDelete(twai_evt_queue);
 		twai_evt_queue = NULL;
 	}
-	if (twai_tx_slots_sem) {
-		vSemaphoreDelete(twai_tx_slots_sem);
-		twai_tx_slots_sem = NULL;
+	if (twai_tx_done_sem) {
+		vSemaphoreDelete(twai_tx_done_sem);
+		twai_tx_done_sem = NULL;
 	}
 }
 
@@ -345,38 +351,61 @@ void twai_receive_task(void *arg)
 
 /* ----------------------------------- TX ------------------------------------ */
 
-void twai_send(twai_message_t *twai_tx_msg)
+esp_err_t twai_send(twai_message_t *twai_tx_msg)
 {
-	// Block while the bus is recovering from bus-off.
-	tMUTEX(twai_bus_off_mutex);
+	if (!twai_node)
+		return ESP_ERR_INVALID_STATE;
+
+	// Wait (bounded) while the bus is recovering from bus-off.
+	if (xSemaphoreTake(twai_bus_off_mutex, pdMS_TO_TICKS(TWAI_TX_GATE_TIMEOUT_MS)) != pdTRUE) {
+		twai_tx_fail_count++;
+		return ESP_ERR_TIMEOUT;
+	}
 	rMUTEX(twai_bus_off_mutex);
 
-	// Wait for a free slot; slots are released in order by on_tx_done.
-	xSemaphoreTake(twai_tx_slots_sem, portMAX_DELAY);
-
+	esp_err_t result;
 	tMUTEX(twai_tx_mutex);
-		twai_tx_slot_t* slot = &twai_tx_slots[twai_tx_slot_next];
-		twai_tx_slot_next = (twai_tx_slot_next + 1) % TWAI_TX_SLOTS;
+		// A previous frame that timed out may still be owned by the driver.
+		// Its buffer can't be reused until the driver reports it done.
+		if (twai_tx_pending) {
+			if (xSemaphoreTake(twai_tx_done_sem, pdMS_TO_TICKS(TWAI_TX_TIMEOUT_MS)) == pdTRUE) {
+				twai_tx_pending = false;
+			} else {
+				twai_tx_fail_count++;
+				result = ESP_ERR_TIMEOUT;
+				goto done;
+			}
+		}
 
 		uint8_t len = twai_tx_msg->data_length_code > 8 ? 8 : twai_tx_msg->data_length_code;
-		memset(slot, 0, sizeof(*slot));
-		memcpy(slot->data, twai_tx_msg->data, len);
-		slot->frame.header.id = twai_tx_msg->identifier;
-		slot->frame.header.ide = twai_tx_msg->extd;
-		slot->frame.header.dlc = len;
-		slot->frame.buffer = slot->data;
-		slot->frame.buffer_len = len;
+		memset(&twai_tx_slot, 0, sizeof(twai_tx_slot));
+		memcpy(twai_tx_slot.data, twai_tx_msg->data, len);
+		twai_tx_slot.frame.header.id = twai_tx_msg->identifier;
+		twai_tx_slot.frame.header.ide = twai_tx_msg->extd;
+		twai_tx_slot.frame.header.dlc = len;
+		twai_tx_slot.frame.buffer = twai_tx_slot.data;
+		twai_tx_slot.frame.buffer_len = len;
 
-		// Like the legacy driver, a frame the controller refuses (bus-off
-		// between the gate above and here) is dropped rather than retried,
-		// so the sender never spins forever. The slot goes back to the pool
-		// because on_tx_done will not fire for a frame that was not queued.
-		esp_err_t err = twai_node_transmit(twai_node, &slot->frame, portMAX_DELAY);
-		if (err != ESP_OK) {
+		xSemaphoreTake(twai_tx_done_sem, 0);	// clear any stale completion
+		result = twai_node_transmit(twai_node, &twai_tx_slot.frame, 0);
+		if (result != ESP_OK) {
 			twai_tx_fail_count++;
-			xSemaphoreGive(twai_tx_slots_sem);
+			goto done;
 		}
+
+		twai_tx_pending = true;
+		if (xSemaphoreTake(twai_tx_done_sem, pdMS_TO_TICKS(TWAI_TX_TIMEOUT_MS)) == pdTRUE) {
+			twai_tx_pending = false;
+			result = twai_tx_last_ok ? ESP_OK : ESP_FAIL;
+		} else {
+			// Not acknowledged on the bus (no ECU, or bus problem). The driver
+			// keeps retrying it; report the failure to the caller.
+			twai_tx_fail_count++;
+			result = ESP_ERR_TIMEOUT;
+		}
+done:
 	rMUTEX(twai_tx_mutex);
+	return result;
 }
 
 /* --------------------------------- alerts ---------------------------------- */

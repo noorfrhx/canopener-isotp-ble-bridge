@@ -8,6 +8,7 @@
 #include "isotp.h"
 #include "constants.h"
 #include "connection_handler.h"
+#include "board.h"
 #include "ble_server.h"
 #include "uart.h"
 #include "twai.h"
@@ -155,7 +156,12 @@ bool16 ch_uart_connection_countdown()
 {
 	if(uart_connection_timer) {
 		if(--uart_connection_timer == 0) {
+#if !BOARD_WIRED_LINK_USB_SERIAL_JTAG
 			ble_start_advertising();
+#endif
+			// With the USB-C link, Bluetooth stays off once a host has used USB,
+			// until the CAN Opener is power-cycled. Otherwise a phone could connect
+			// during a long pause in a flash and take the session over.
 			ch_on_uart_disconnect();
 		}
 	}

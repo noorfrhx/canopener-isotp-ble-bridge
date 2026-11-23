@@ -431,7 +431,12 @@ void isotp_on_can_message(IsoTpLink *link, uint8_t *data, uint16_t len) {
                     } else {
 						link->send_bs_remain = message.as.flow_control.BS;
                     }
-					link->send_st_min       = link->stmin_override ? link->stmin_override : stmin_to_us(message.as.flow_control.STmin);
+					{
+						// Never send faster than the control unit asked for: use the
+						// larger of the host's override and the ECU's requested STmin.
+						uint32_t fc_st_min = stmin_to_us(message.as.flow_control.STmin);
+						link->send_st_min = (link->stmin_override > fc_st_min) ? link->stmin_override : fc_st_min;
+					}
                     link->send_timer_st     = isotp_time + link->send_st_min;
                     link->send_wtf_count    = 0;
                 }

@@ -23,6 +23,13 @@
 #define BOARD_CAN_STB_GPIO      3
 #define BOARD_CAN_STB_ACTIVE    0
 
+// Wired host link (BridgeLEG serial protocol, used by VW_Flash --interface USBISOTP).
+// 1 = the ESP32-C5's native USB Serial/JTAG, which is the CAN Opener's USB-C port.
+// 0 = UART0 on GPIO 11/12 (not reachable from outside the case).
+// With 1, nothing else may write to USB Serial/JTAG: the console must be off
+// (CONFIG_ESP_CONSOLE_NONE) or log lines would corrupt the binary stream.
+#define BOARD_WIRED_LINK_USB_SERIAL_JTAG	1
+
 // Addressable RGB status LED (WS2812-style), no separate power-enable pin.
 #define BOARD_LED_GPIO          2
 

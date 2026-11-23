@@ -3,9 +3,12 @@
 #include "freertos/queue.h"
 #include "freertos/semphr.h"
 #include "driver/uart.h"
+#include "driver/usb_serial_jtag.h"
+#include "board.h"
 #include "esp_log.h"
 #include "esp_err.h"
 #include "esp_task_wdt.h"
+#include "esp_timer.h"
 #include "uart.h"
 #include "constants.h"
 #include "ble_server.h"
@@ -16,7 +19,9 @@
 #define UART_TAG 		"UART"
 
 static QueueHandle_t		uart_send_queue				= NULL;
+#if !BOARD_WIRED_LINK_USB_SERIAL_JTAG
 static QueueHandle_t		uart_receive_queue			= NULL;
+#endif
 static SemaphoreHandle_t	uart_buffer_mutex			= NULL;
 static SemaphoreHandle_t	uart_receive_task_mutex		= NULL;
 static SemaphoreHandle_t	uart_send_task_mutex		= NULL;
@@ -25,6 +30,7 @@ static bool16				uart_packet_started			= false;
 static uint16_t				uart_buffer_length			= 0;
 static uint16_t				uart_buffer_pos 			= 0;
 static uint8_t				uart_buffer[UART_BUFFER_SIZE];
+static volatile int64_t		uart_last_rx_us				= 0;
 
 static bool16				uart_buffer_check_header();
 static bool16 				uart_buffer_add(uint8_t* tmp_buffer, uint16_t size);
@@ -41,6 +47,18 @@ void uart_init()
 {
 	uart_deinit();
 
+#if BOARD_WIRED_LINK_USB_SERIAL_JTAG
+	// Wired link over the ESP32-C5's native USB (the CAN Opener's USB-C port).
+	// The host sees a USB CDC serial port; the baud rate it sets is ignored.
+	// Ring buffers larger than the biggest packet VW_Flash sends (a 4095-byte
+	// TransferData plus the 8-byte header), so a full packet fits even if the
+	// receive task is briefly busy.
+	usb_serial_jtag_driver_config_t usb_config = {
+		.tx_buffer_size = USB_LINK_RING_BUFFER_SIZE,
+		.rx_buffer_size = USB_LINK_RING_BUFFER_SIZE,
+	};
+	ESP_ERROR_CHECK(usb_serial_jtag_driver_install(&usb_config));
+#else
 	/* Configure parameters of an UART driver,
 	 * communication pins and install the driver */
 	uart_config_t uart_config = {
@@ -54,6 +72,7 @@ void uart_init()
 	ESP_ERROR_CHECK(uart_driver_install(UART_PORT_NUM, UART_INTERNAL_BUFFER_SIZE, UART_INTERNAL_BUFFER_SIZE, UART_QUEUE_SIZE, &uart_receive_queue, 0));
 	ESP_ERROR_CHECK(uart_param_config(UART_PORT_NUM, &uart_config));
 	ESP_ERROR_CHECK(uart_set_pin(UART_PORT_NUM, UART_TXD, UART_RXD, UART_RTS, UART_CTS));
+#endif
 
 	uart_send_queue			= xQueueCreate(UART_QUEUE_SIZE, sizeof(send_message_t));
 	uart_receive_task_mutex	= xSemaphoreCreateMutex();
@@ -67,7 +86,12 @@ void uart_deinit()
 {
 	bool16 didDeInit = false;
 
+#if BOARD_WIRED_LINK_USB_SERIAL_JTAG
+	if (usb_serial_jtag_is_driver_installed())
+		usb_serial_jtag_driver_uninstall();
+#else
 	uart_driver_delete(UART_PORT_NUM);
+#endif
 
 	if (uart_send_queue) {
 		//clear and delete queue
@@ -124,7 +148,10 @@ void uart_stop_task()
 		uart_run_task = false;
 
 		send_message_t msg = {0};
+#if !BOARD_WIRED_LINK_USB_SERIAL_JTAG
+		// In USB mode the receive task polls with a timeout, so no wake-up is needed.
 		xQueueSend(uart_receive_queue, &msg, portMAX_DELAY);
+#endif
 		xSemaphoreTake(uart_receive_task_mutex, portMAX_DELAY);
 		xSemaphoreGive(uart_receive_task_mutex);
 
@@ -173,8 +200,15 @@ void uart_send_task(void *arg)
 		{
 			if (xQueueReceive(uart_send_queue, &event, pdMS_TO_TICKS(TIMEOUT_LONG)) == pdTRUE) {
 				if (event.buffer) {
-					if (uart_run_task)
+					if (uart_run_task) {
+#if BOARD_WIRED_LINK_USB_SERIAL_JTAG
+						// Returns once the data is in the TX ring buffer. If no host is
+						// reading, give up after a while rather than blocking forever.
+						usb_serial_jtag_write_bytes(event.buffer, event.msg_length, pdMS_TO_TICKS(TIMEOUT_LONG));
+#else
 						uart_write_bytes(UART_PORT_NUM, (const char*)event.buffer, event.msg_length);
+#endif
+					}
 
 					free(event.buffer);
 				}
@@ -194,6 +228,11 @@ void uart_send_task(void *arg)
 
 void uart_buffer_clear()
 {
+	// Called once a second by the connection handler to drop a stale partial
+	// packet. Only drop it if nothing has arrived for a full second, so bytes
+	// that came in just before the tick aren't thrown away.
+	if (esp_timer_get_time() - uart_last_rx_us < 1000000)
+		return;
 	tMUTEX(uart_buffer_mutex);
 		uart_buffer_clear_unsafe();
 	rMUTEX(uart_buffer_mutex);
@@ -356,6 +395,28 @@ void uart_receive_task(void *arg)
 	tMUTEX(uart_receive_task_mutex);
 		ESP_LOGI(UART_TAG, "Task receive started");
 		xSemaphoreGive(sync_task_sem);
+#if BOARD_WIRED_LINK_USB_SERIAL_JTAG
+		static uint8_t usb_rx[512];
+		while(uart_run_task)
+		{
+			int len = usb_serial_jtag_read_bytes(usb_rx, sizeof(usb_rx), pdMS_TO_TICKS(TIMEOUT_NORMAL));
+			if (len > 0 && uart_run_task) {
+				uart_last_rx_us = esp_timer_get_time();
+				tMUTEX(uart_buffer_mutex);
+					if (uart_buffer_add(usb_rx, len)) {
+						// Host sent more than the parse buffer holds: drop the partial packet.
+						ESP_LOGW(UART_TAG, "usb rx buffer overflow");
+						uart_buffer_clear_unsafe();
+					}
+					while (uart_buffer_parse());
+				rMUTEX(uart_buffer_mutex);
+			}
+
+			//reset the WDT and yield to tasks
+			esp_task_wdt_reset();
+			taskYIELD();
+		}
+#else
 		uart_event_t 	event;
 		while(uart_run_task)
 		{
@@ -416,6 +477,7 @@ void uart_receive_task(void *arg)
 			esp_task_wdt_reset();
 			taskYIELD();
 		}
+#endif
 		ESP_LOGI(UART_TAG, "Task receive stopped");
 	rMUTEX(uart_receive_task_mutex);
 
