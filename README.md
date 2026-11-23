@@ -9,7 +9,7 @@ It turns the CAN Opener into an ISO-TP adapter for:
 
 The bridge has preset links for the ECU (0x7E0/0x7E8), TCU (0x7E1/0x7E9), Haldex (0x7E5/0x7ED) and the broadcast DTC address.
 
-> **Status: desk-tested, not yet tested on a car.** On a real CAN Opener SE: VW_Flash connects over USB-C, 15/15 port open/close cycles without a reset, 4103-byte flash-sized packets are handled, and failed CAN sends are reported cleanly. Nothing has been sent to a real ECU yet, and flash-sized transfers haven't been tested on a live CAN bus. Bench-test against a second CAN adapter, then do read-only work on a car, before you flash anything.
+> **Status: desk-tested, not yet tested on a car.** On a real CAN Opener SE: VW_Flash connects over USB-C, 15/15 port open/close cycles without a reset, 4103-byte flash-sized packets are handled, and failed CAN sends are reported cleanly. Nothing has been sent to a real ECU yet, and flash-sized transfers haven't been tested on a live CAN bus. Do read-only work on a car (identification, fault codes, logging) before you flash anything.
 
 ## What changed from the A0 version
 
