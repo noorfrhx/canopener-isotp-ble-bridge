@@ -60,7 +60,7 @@ uv run VW_Flash.py --interface USBISOTP --usb_name /dev/cu.usbmodem101 --action 
 
 - On macOS, VW_Flash opens the port with DTR and RTS high, which doesn't reset the chip. Opening the port with DTR and RTS low does reset it, so don't open the port with other serial tools during a session.
 - The chip's ROM still prints a short boot banner after any reset. Turning that off needs an eFuse burn, which this project doesn't do.
-- VW_Flash's DQ381 mode sends an adapter setting (`0x9`) that this bridge doesn't implement. Don't flash a DQ381 gearbox with it.
+- VW_Flash's DQ381 mode sends adapter setting `0x9` ("dq3xx hack"). The bridge implements it as in bri3d's `dq3xx` branch of esp32-isotp-ble-bridge: on the link it's set for (0x7E1/0x7E9 in VW_Flash), a single-frame `7F 31 xx` reply from the TCU is followed, STmin later, by a `30 00 00` flow-control Continue, which DQ381 gearboxes expect. Host test: `test/test_dq3xx.c`. **Not yet tested on a DQ381**, so a first gearbox flash is still a first.
 
 ## Known gaps
 
@@ -68,5 +68,5 @@ uv run VW_Flash.py --interface USBISOTP --usb_name /dev/cu.usbmodem101 --action 
 - **Single core:** the ISO-TP processing task runs above the USB tasks. It no longer busy-waits during multi-frame transfers: it blocks until the next flow-control or consecutive frame arrives, and waits out STmin with a short delay. It hasn't been measured under a real flash yet.
 - **USB reset:** opening the port with DTR and RTS low still resets the chip during a session. Setting `usb_uart_chip_rst_dis` after the first USB packet was tried and didn't stop it on the ESP32-C5, so it was taken out.
 - **Bluetooth has no authentication.** If a phone connects before the first USB packet, the bridge sends everything to the phone instead. Unplug the bridge when you're not using it.
-- **DQ381 adapter setting** (`0x9`) not implemented.
+- **DQ381 adapter setting** (`0x9`): implemented and host-tested, not yet tested against a real DQ381. Padding stays 0xAA; the upstream branch also switched padding to 0x55.
 - **CAN 2** (OBD-II pins 3/11) is not used.

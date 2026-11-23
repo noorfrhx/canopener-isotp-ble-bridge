@@ -60,6 +60,7 @@ typedef struct IsoTpLink {
     int16_t						receive_protocol_result;
 	uint16_t					receive_status;
 	uint16_t				   	stmin_override;
+	uint16_t					dq3xx_hack;     /* 1: answer a single-frame 7F 31 xx with a 30 00 00 Continue (DQ381 TCUs expect it) */
 } IsoTpLink;
 
 /**

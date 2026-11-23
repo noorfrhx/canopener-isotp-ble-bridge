@@ -48,6 +48,7 @@ typedef enum {
     ISOTP_SEND_STATUS_IDLE,
     ISOTP_SEND_STATUS_INPROGRESS,
     ISOTP_SEND_STATUS_ERROR,
+    ISOTP_SEND_STATUS_BOGUS_CONTINUE, /* DQ3xx hack: flow-control Continue owed after a 7F 31 reply */
 } IsoTpSendStatusTypes;
 
 /* ISOTP receiver status */

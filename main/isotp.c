@@ -311,6 +311,20 @@ void isotp_on_can_message(IsoTpLink *link, uint8_t *data, uint16_t len) {
             ret = isotp_receive_single_frame(link, &message, len);
             
             if (ISOTP_RET_OK == ret) {
+                /* DQ3xx hack (VW_Flash --dq381 sets bridge setting 9 on the TCU link):
+                   the DQ381 expects a 30 xx xx Continue after it answers a
+                   RoutineControl with a single-frame negative/pending response
+                   (7F 31 xx), although no multi-frame transfer is open. Send one
+                   STmin later from isotp_poll(). Same as bri3d's dq3xx branch of
+                   esp32-isotp-ble-bridge (commits 4803ab3, 085b48b, 76553e8). */
+                if (1 == link->dq3xx_hack &&
+                    ISOTP_SEND_STATUS_INPROGRESS != link->send_status &&
+                    message.as.single_frame.SF_DL >= 2 &&
+                    message.as.single_frame.data[0] == 0x7F &&
+                    message.as.single_frame.data[1] == 0x31) {
+                    link->send_timer_st = isotp_user_get_us() + link->stmin_override;
+                    link->send_status = ISOTP_SEND_STATUS_BOGUS_CONTINUE;
+                }
                 /* change status */
                 link->receive_status = ISOTP_RECEIVE_STATUS_FULL;
             }
@@ -523,6 +537,14 @@ void isotp_poll(IsoTpLink *link) {
 		if(isotp_time > link->send_timer_bs) {
             link->send_protocol_result = ISOTP_PROTOCOL_RESULT_TIMEOUT_BS;
             link->send_status = ISOTP_SEND_STATUS_ERROR;
+        }
+    }
+
+    /* DQ3xx hack: send the owed Continue once STmin has passed */
+    if (ISOTP_SEND_STATUS_BOGUS_CONTINUE == link->send_status) {
+        if (isotp_user_get_us() > link->send_timer_st) {
+            isotp_send_flow_control(link, PCI_FLOW_STATUS_CONTINUE, 0, 0);
+            link->send_status = ISOTP_SEND_STATUS_IDLE;
         }
     }
 

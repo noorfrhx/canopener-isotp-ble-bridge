@@ -21,6 +21,7 @@ typedef int16_t							bool16;
 #define BRG_SETTING_BLE_MULTI_DELAY		6
 #define BRG_SETTING_PASSWORD			7
 #define BRG_SETTING_GAP					8
+#define BRG_SETTING_DQ3XX				9	// DQ381/DQ3xx flash quirk, see isotp.c
 
 #define TASK_STACK_SIZE					3072 //2048
 

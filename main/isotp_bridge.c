@@ -158,12 +158,26 @@ static void isotp_processing_task(void *arg)
 			tMUTEX(isotp_link_container->data_mutex);
 				bool send_active = link_ptr->send_status == ISOTP_SEND_STATUS_INPROGRESS;
 				bool recv_active = link_ptr->receive_status == ISOTP_RECEIVE_STATUS_INPROGRESS;
+				bool continue_owed = link_ptr->send_status == ISOTP_SEND_STATUS_BOGUS_CONTINUE;
+				uint64_t continue_due = link_ptr->send_timer_st;
 				bool fc_allows_send = link_ptr->send_bs_remain == ISOTP_INVALID_BS ||
 									  link_ptr->send_bs_remain > 0;
 				uint64_t st_due = link_ptr->send_st_min ? link_ptr->send_timer_st : 0;
 			rMUTEX(isotp_link_container->data_mutex);
 
-			if (!send_active && !recv_active) {
+			if (continue_owed && !recv_active) {
+				// DQ3xx hack: a Continue is due STmin after a 7F 31 reply.
+				// Wait it out like an STmin gap, then isotp_poll() sends it.
+				uint64_t now = esp_timer_get_time();
+				if (continue_due > now) {
+					uint64_t gap_us = continue_due - now;
+					if (gap_us >= 1000000ULL / configTICK_RATE_HZ) {
+						vTaskDelay(pdMS_TO_TICKS(gap_us / 1000) ? pdMS_TO_TICKS(gap_us / 1000) : 1);
+					} else {
+						esp_rom_delay_us((uint32_t)gap_us + 1);
+					}
+				}
+			} else if (!send_active && !recv_active) {
 				// Idle: sleep until a CAN frame or a send request arrives.
 				xSemaphoreTake(isotp_link_container->wait_for_isotp_data_sem, pdMS_TO_TICKS(TIMEOUT_LONG));
 			} else if (send_active && fc_allows_send) {
@@ -460,6 +474,18 @@ bool16 parse_packet(ble_header_t* header, uint8_t* data)
 								}
 							}
 							break;
+						case BRG_SETTING_DQ3XX:
+							for(uint16_t i = 0; i < NUM_ISOTP_LINK_CONTAINERS; i++)
+							{
+								IsoTpLinkContainer *isotp_link_container = &isotp_link_containers[i];
+								if(header->rxID == isotp_link_container->link.receive_arbitration_id &&
+									header->txID == isotp_link_container->link.send_arbitration_id)
+								{
+									uint16_t dq3xx = isotp_link_container->link.dq3xx_hack;
+									send_packet(isotp_link_container->link.receive_arbitration_id, isotp_link_container->link.send_arbitration_id, BLE_COMMAND_FLAG_SETTINGS | BRG_SETTING_DQ3XX, &dq3xx, sizeof(uint16_t));
+								}
+							}
+							break;
 						case BRG_SETTING_LED_COLOR:
 							{
 								uint32_t color = led_getcolor();
@@ -525,6 +551,33 @@ bool16 parse_packet(ble_header_t* header, uint8_t* data)
 										uint16_t* stmin = (uint16_t*)data;
 										isotp_link_container->link.stmin_override = *stmin;
 										ESP_LOGI(BRIDGE_TAG, "Set stmin [%04X] on container [%02X]", *stmin, i);
+										link_found = true;
+									}
+								rMUTEX(isotp_link_container->data_mutex);
+
+								if(link_found)
+									return true;
+							}
+						}
+						break;
+					case BRG_SETTING_DQ3XX:
+						// Set per link, matched by rx/tx ids like STmin (VW_Flash
+						// sends it on 0x7E9/0x7E1 for --dq381 flashes).
+						if(header->cmdSize == sizeof(uint16_t))
+						{
+							for(uint16_t i = 0; i < NUM_ISOTP_LINK_CONTAINERS; i++)
+							{
+								bool16 link_found = false;
+								IsoTpLinkContainer *isotp_link_container = &isotp_link_containers[i];
+								tMUTEX(isotp_link_container->data_mutex);
+									if(header->rxID == isotp_link_container->link.receive_arbitration_id &&
+										header->txID == isotp_link_container->link.send_arbitration_id)
+									{
+										uint16_t dq3xx;
+										memcpy(&dq3xx, data, sizeof(dq3xx));
+										isotp_link_container->link.dq3xx_hack = dq3xx;
+										if (dq3xx == 0 && isotp_link_container->link.send_status == ISOTP_SEND_STATUS_BOGUS_CONTINUE)
+											isotp_link_container->link.send_status = ISOTP_SEND_STATUS_IDLE;
 										link_found = true;
 									}
 								rMUTEX(isotp_link_container->data_mutex);
