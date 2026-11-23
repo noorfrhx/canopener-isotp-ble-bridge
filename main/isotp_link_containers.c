@@ -13,6 +13,7 @@ uint16_t isotp_link_container_id;
 
 #define LINKS_TAG 		"ISOTP_LINKS"
 
+
 void configure_isotp_links()
 {
 	disable_isotp_links();
@@ -90,6 +91,26 @@ void configure_isotp_links()
 		0x700, 0x7E8,
 		dtc_isotp_link_container->send_buf, dtc_isotp_link_container->buffer_size,
 		dtc_isotp_link_container->recv_buf, dtc_isotp_link_container->buffer_size
+	);
+
+	// Flexible module link: starts unused (ids 0) and is pointed at whichever
+	// other module (ABS, gateway, airbag...) the host sends to, for reading and
+	// clearing fault memory. Small buffers: internal RAM is tight with Bluetooth.
+	IsoTpLinkContainer *module_link_container = &isotp_link_containers[ISOTP_MODULE_LINK];
+	module_link_container->number = ISOTP_MODULE_LINK;
+	strcpy(module_link_container->name, "isotp_container_module");
+	module_link_container->buffer_size = ISOTP_BUFFER_SIZE_MODULE;
+	module_link_container->recv_buf = calloc(1, module_link_container->buffer_size);
+	module_link_container->send_buf = calloc(1, module_link_container->buffer_size);
+	module_link_container->payload_buf = calloc(1, module_link_container->buffer_size);
+	assert(module_link_container->recv_buf != NULL);
+	assert(module_link_container->send_buf != NULL);
+	assert(module_link_container->payload_buf != NULL);
+	isotp_init_link(
+		&module_link_container->link,
+		0, 0,
+		module_link_container->send_buf, module_link_container->buffer_size,
+		module_link_container->recv_buf, module_link_container->buffer_size
 	);
 
 	//create semaphores/mutexs for each link

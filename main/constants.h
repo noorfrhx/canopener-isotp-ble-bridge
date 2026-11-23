@@ -40,6 +40,7 @@ typedef int16_t							bool16;
 
 #define ISOTP_BUFFER_SIZE 				4096
 #define ISOTP_BUFFER_SIZE_SMALL 		512
+#define ISOTP_BUFFER_SIZE_MODULE 		1024	// fault lists from other modules (up to 255 faults)
 
 #define TIMEOUT_SHORT					50
 #define TIMEOUT_NORMAL					100

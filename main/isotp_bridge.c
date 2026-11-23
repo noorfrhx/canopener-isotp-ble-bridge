@@ -272,6 +272,27 @@ static void isotp_send_queue_task(void *arg)
 
 						if(found_container)
 							break;
+
+						// No fixed link for these ids: point the flexible module
+						// link at them (diagnostic id range only, and only while
+						// it isn't mid-transfer), then send through it.
+						if (i == NUM_ISOTP_LINK_CONTAINERS - 1 &&
+							msg.rxID >= 0x700 && msg.rxID <= 0x7FF &&
+							msg.txID >= 0x700 && msg.txID <= 0x7FF) {
+							IsoTpLinkContainer* module = &isotp_link_containers[ISOTP_MODULE_LINK];
+							tMUTEX(module->data_mutex);
+								if (module->link.send_status != ISOTP_SEND_STATUS_INPROGRESS &&
+									module->link.receive_status != ISOTP_RECEIVE_STATUS_INPROGRESS) {
+									module->link.send_arbitration_id = msg.rxID;
+									module->link.receive_arbitration_id = msg.txID;
+									isotp_link_container_id = ISOTP_MODULE_LINK;
+									int send_ret = isotp_send(&module->link, msg.buffer, msg.msg_length);
+									if (send_ret != ISOTP_RET_OK)
+										ESP_LOGW(BRIDGE_TAG, "isotp_send (module link) failed: %d", send_ret);
+									xSemaphoreGive(module->wait_for_isotp_data_sem);
+								}
+							rMUTEX(module->data_mutex);
+						}
 					}
 					free(msg.buffer);
 				}
