@@ -9,7 +9,7 @@ It turns the CAN Opener into an ISO-TP adapter for:
 
 The bridge has preset links for the ECU (0x7E0/0x7E8), TCU (0x7E1/0x7E9), Haldex (0x7E5/0x7ED) and the broadcast DTC address.
 
-> **Status: desk-tested, not yet tested on a car.** On a real CAN Opener SE: VW_Flash connects over USB-C, 15/15 port open/close cycles without a reset, 4103-byte flash-sized packets are handled, and failed CAN sends are reported cleanly. Nothing has been sent to a real ECU yet, and flash-sized transfers haven't been tested on a live CAN bus. Do read-only work on a car (identification, fault codes, logging) before you flash anything.
+> **Status: desk-tested, not yet tested on a car.** On a real CAN Opener SE: VW_Flash connects over USB-C, 15/15 port open/close cycles without a reset, 4103-byte flash-sized packets are handled, and failed CAN sends are reported cleanly. It has since read identification, fault codes and 11 minutes of live data from a real Simos 18 ECU without dropouts; flash-sized transfers haven't been tested on a live CAN bus. Do read-only work on a car (identification, fault codes, logging) before you flash anything.
 
 ## What changed from the A0 version
 
@@ -65,7 +65,8 @@ uv run VW_Flash.py --interface USBISOTP --usb_name /dev/cu.usbmodem101 --action 
 ## Known gaps
 
 - **Not tested on a car or a live CAN bus with flash-sized transfers.**
-- **Single core:** the ISO-TP processing task polls at a higher priority than the USB tasks during multi-frame transfers. Fine at the desk; it hasn't been measured under a real flash.
+- **Single core:** the ISO-TP processing task runs above the USB tasks. It no longer busy-waits during multi-frame transfers: it blocks until the next flow-control or consecutive frame arrives, and waits out STmin with a short delay. It hasn't been measured under a real flash yet.
+- **USB reset:** opening the port with DTR and RTS low still resets the chip during a session. Setting `usb_uart_chip_rst_dis` after the first USB packet was tried and didn't stop it on the ESP32-C5, so it was taken out.
 - **Bluetooth has no authentication.** If a phone connects before the first USB packet, the bridge sends everything to the phone instead. Unplug the bridge when you're not using it.
 - **DQ381 adapter setting** (`0x9`) not implemented.
 - **CAN 2** (OBD-II pins 3/11) is not used.

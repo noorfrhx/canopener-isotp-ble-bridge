@@ -11,6 +11,7 @@
 #include "esp_task_wdt.h"
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "esp_rom_sys.h"
 #include "isotp.h"
 #include "ble_server.h"
 #include "isotp_link_containers.h"
@@ -149,11 +150,43 @@ static void isotp_processing_task(void *arg)
 		xSemaphoreGive(sync_task_sem);
 		while (isotp_allow_run_tasks())
 		{
-			if (link_ptr->send_status != ISOTP_SEND_STATUS_INPROGRESS &&
-				link_ptr->receive_status != ISOTP_RECEIVE_STATUS_INPROGRESS) {
+			// Wait for work without busy-spinning. This task runs above the USB
+			// RX/TX tasks and IDLE on a single core: spinning while waiting for
+			// a flow-control frame, the next consecutive frame or STmin would
+			// starve them, and a wait over 5 s would trip the task WDT and reset
+			// the bridge in the middle of a flash.
+			tMUTEX(isotp_link_container->data_mutex);
+				bool send_active = link_ptr->send_status == ISOTP_SEND_STATUS_INPROGRESS;
+				bool recv_active = link_ptr->receive_status == ISOTP_RECEIVE_STATUS_INPROGRESS;
+				bool fc_allows_send = link_ptr->send_bs_remain == ISOTP_INVALID_BS ||
+									  link_ptr->send_bs_remain > 0;
+				uint64_t st_due = link_ptr->send_st_min ? link_ptr->send_timer_st : 0;
+			rMUTEX(isotp_link_container->data_mutex);
+
+			if (!send_active && !recv_active) {
+				// Idle: sleep until a CAN frame or a send request arrives.
 				xSemaphoreTake(isotp_link_container->wait_for_isotp_data_sem, pdMS_TO_TICKS(TIMEOUT_LONG));
+			} else if (send_active && fc_allows_send) {
+				// Next consecutive frame may go once STmin has passed. Short gaps
+				// are waited out exactly; each frame sent then blocks in
+				// twai_send() until it is on the bus, which lets other tasks run.
+				uint64_t now = esp_timer_get_time();
+				if (st_due > now) {
+					uint64_t gap_us = st_due - now;
+					if (gap_us >= 1000000ULL / configTICK_RATE_HZ) {
+						vTaskDelay(pdMS_TO_TICKS(gap_us / 1000) ? pdMS_TO_TICKS(gap_us / 1000) : 1);
+					} else {
+						esp_rom_delay_us((uint32_t)gap_us + 1);
+					}
+				}
+			} else {
+				// Waiting for the ECU: a flow-control frame (sending) or the next
+				// consecutive frame (receiving). The CAN RX task gives this
+				// semaphore when a frame for this link arrives; wake every tick
+				// anyway so isotp_poll() can check the timeouts.
+				xSemaphoreTake(isotp_link_container->wait_for_isotp_data_sem, 1);
 			}
-			
+
 			// poll
 			tMUTEX(isotp_link_container->data_mutex);
 				isotp_poll(link_ptr);
