@@ -23,6 +23,7 @@
 #include "uart.h"
 #include "connection_handler.h"
 #include "isotp_bridge.h"
+#include "elm_ble.h"
 
 #define BRIDGE_TAG 					"Bridge"
 
@@ -125,6 +126,8 @@ void write_password(char* data)
 
 void send_packet(uint32_t txID, uint32_t rxID, uint8_t flags, const void* src, size_t size)
 {
+	if (elm_ble_reply(txID, rxID, flags, src, size))
+		return;
 	if(ble_connected()) {
 		ble_send(txID, rxID, flags, src, size);
 	} else {
@@ -257,6 +260,10 @@ static void isotp_send_queue_task(void *arg)
 		while (isotp_allow_run_tasks()) {
 			send_message_t msg;
 			if (xQueueReceive(isotp_send_message_queue, &msg, pdMS_TO_TICKS(TIMEOUT_LONG)) == pdTRUE) {
+				if (msg.flags && !ble_elm_session()) {
+					free(msg.buffer);
+					continue;
+				}
 				if (isotp_allow_run_tasks()) {
 					ESP_LOGD(BRIDGE_TAG, "isotp_send_queue_task: sending message with %d size (rx id: %04x / tx id: %04x)", msg.msg_length, msg.rxID, msg.txID);
 					for (uint16_t i = 0; i < NUM_ISOTP_LINK_CONTAINERS; i++) {
@@ -276,7 +283,8 @@ static void isotp_send_queue_task(void *arg)
 									esp_task_wdt_reset();
 									tMUTEX(isotp_link_container->data_mutex);
 								}
-								int send_ret = isotp_send(&isotp_link_container->link, msg.buffer, msg.msg_length);
+								uint32_t request_id = msg.flags == ISOTP_SEND_ELM_FUNCTIONAL ? 0x7DF : msg.rxID;
+								int send_ret = isotp_send_with_id(&isotp_link_container->link, request_id, msg.buffer, msg.msg_length);
 								if (send_ret != ISOTP_RET_OK)
 									ESP_LOGW(BRIDGE_TAG, "isotp_send failed: %d", send_ret);
 								xSemaphoreGive(isotp_link_container->wait_for_isotp_data_sem);
@@ -409,7 +417,7 @@ void isotp_stop_task()
 			xSemaphoreGive(isotp_link_container->task_mutex);
 		}
 
-		send_message_t msg;
+		send_message_t msg = {0};
 		xQueueSend(isotp_send_message_queue, &msg, portMAX_DELAY);
 		xSemaphoreTake(isotp_send_task_mutex, portMAX_DELAY);
 		xSemaphoreGive(isotp_send_task_mutex);
@@ -708,7 +716,7 @@ bool16 parse_packet(ble_header_t* header, uint8_t* data)
 				{
 					ESP_LOGI(BRIDGE_TAG, "Received message [%04X]", header->cmdSize);
 
-					send_message_t msg;
+					send_message_t msg = {0};
 					msg.msg_length = header->cmdSize;
 					msg.rxID = header->txID;
 					msg.txID = header->rxID;

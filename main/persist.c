@@ -270,7 +270,7 @@ bool16 persist_send(persist_t* pPersist)
 		}
 
 		//We are good, lets send the message!
-		send_message_t msg;
+		send_message_t msg = {0};
 		msg.buffer = malloc(pMsg->msg_length);
 		if (msg.buffer == NULL) {
 			ESP_LOGW(PERSIST_TAG, "Unable to send message: malloc error %s %d", __func__, __LINE__);

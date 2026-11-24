@@ -24,12 +24,14 @@
 #include "nvs_flash.h"
 #include "esp_bt.h"
 #include "string.h"
+#include <stdatomic.h>
 
 #include "esp_gap_ble_api.h"
 #include "esp_gatts_api.h"
 #include "esp_bt_defs.h"
 #include "esp_bt_main.h"
 #include "ble_server.h"
+#include "elm_ble.h"
 
 #define BLE_TAG  							"BLE"
 
@@ -50,11 +52,11 @@ static const uint16_t spp_service_uuid = 0xABF0;
 #define ESP_GATT_UUID_SPP_COMMAND_RECEIVE   0xABF3
 #define ESP_GATT_UUID_SPP_COMMAND_NOTIFY    0xABF4
 
-static uint8_t spp_adv_data[23] = {
+static uint8_t spp_adv_data[11 + MAX_GAP_LENGTH] = {
     /* Flags */
     0x02,0x01,0x06,
     /* Complete List of 16-bit Service Class UUIDs */
-    0x03,0x03,0xF0,0xAB,
+    0x05,0x03,0xF0,0xAB,0xF0,0xFF,
     /* Complete Local Name in advertising */
     0x0F,0x09, 'B', 'L', 'E', '_', 'T', 'O', '_', 'I', 'S', 'O', 'T','P', '2', '0'
 };
@@ -65,7 +67,7 @@ static uint16_t             ble_delay_multi				    = DEFAULT_DELAY_MULTI;
 static bool16               ble_run_tasks                   = false;
 static ble_server_callbacks server_callbacks;
 
-static uint16_t             spp_mtu_size 					= DEFAULT_MTU_SIZE;
+static atomic_uint_least16_t spp_mtu_size 					= DEFAULT_MTU_SIZE;
 static uint16_t             spp_conn_id 					= 0xffff;
 static esp_gatt_if_t        spp_gatts_if 				    = 0xff;
 static QueueHandle_t        spp_send_queue 			        = NULL;
@@ -79,6 +81,15 @@ static bool16               allow_connection                = true;
 static esp_bd_addr_t        spp_remote_bda                  = {0x0,};
 
 static uint16_t             spp_handle_table[SPP_IDX_NB];
+
+enum {
+    ELM_SVC, ELM_NOTIFY_DECL, ELM_NOTIFY, ELM_CCCD, ELM_WRITE_DECL, ELM_WRITE, ELM_ATTR_COUNT
+};
+static uint16_t elm_handles[ELM_ATTR_COUNT];
+static atomic_bool elm_claimed;
+static const uint16_t elm_service_uuid = 0xFFF0;
+static const uint16_t elm_notifier_uuid = 0xFFF1;
+static const uint16_t elm_writer_uuid = 0xFFF2;
 
 static esp_ble_adv_params_t spp_adv_params = {
     .adv_int_min        = 0x20,
@@ -236,6 +247,40 @@ static uint8_t find_char_and_desr_index(uint16_t handle)
     }
 
     return error;
+}
+
+static const uint8_t elm_write_props = ESP_GATT_CHAR_PROP_BIT_WRITE | ESP_GATT_CHAR_PROP_BIT_WRITE_NR;
+static const uint8_t elm_empty[2] = {0};
+static const esp_gatts_attr_db_t elm_gatt_db[ELM_ATTR_COUNT] = {
+    [ELM_SVC] = {{ESP_GATT_AUTO_RSP}, {ESP_UUID_LEN_16, (uint8_t *)&primary_service_uuid,
+        ESP_GATT_PERM_READ, 2, 2, (uint8_t *)&elm_service_uuid}},
+    [ELM_NOTIFY_DECL] = {{ESP_GATT_AUTO_RSP}, {ESP_UUID_LEN_16, (uint8_t *)&character_declaration_uuid,
+        ESP_GATT_PERM_READ, 1, 1, (uint8_t *)&char_prop_read_notify}},
+    [ELM_NOTIFY] = {{ESP_GATT_AUTO_RSP}, {ESP_UUID_LEN_16, (uint8_t *)&elm_notifier_uuid,
+        ESP_GATT_PERM_READ, 20, 0, (uint8_t *)elm_empty}},
+    [ELM_CCCD] = {{ESP_GATT_AUTO_RSP}, {ESP_UUID_LEN_16, (uint8_t *)&character_client_config_uuid,
+        ESP_GATT_PERM_READ | ESP_GATT_PERM_WRITE, 2, 2, (uint8_t *)elm_empty}},
+    [ELM_WRITE_DECL] = {{ESP_GATT_AUTO_RSP}, {ESP_UUID_LEN_16, (uint8_t *)&character_declaration_uuid,
+        ESP_GATT_PERM_READ, 1, 1, (uint8_t *)&elm_write_props}},
+    [ELM_WRITE] = {{ESP_GATT_AUTO_RSP}, {ESP_UUID_LEN_16, (uint8_t *)&elm_writer_uuid,
+        ESP_GATT_PERM_WRITE, SPP_DATA_MAX_LEN, 0, (uint8_t *)elm_empty}},
+};
+
+bool ble_elm_session(void)
+{
+    return atomic_load(&elm_claimed);
+}
+
+static void elm_notify(const char *data, size_t size)
+{
+    size_t limit = spp_mtu_size - 3;
+    for (size_t offset = 0; offset < size;) {
+        size_t length = size - offset < limit ? size - offset : limit;
+        if (esp_ble_gatts_send_indicate(spp_gatts_if, spp_conn_id, elm_handles[ELM_NOTIFY],
+                                       length, (uint8_t *)data + offset, false) != ESP_OK)
+            break;
+        offset += length;
+    }
 }
 
 static bool16 store_wr_buffer(esp_ble_gatts_cb_param_t *p_data)
@@ -514,11 +559,12 @@ static void gatts_profile_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_
             tMUTEX(ble_settings_mutex);
 			    ESP_ERROR_CHECK(esp_ble_gap_set_device_name(ble_gap_name));
 			    ESP_LOGI(BLE_TAG, "%s %d", __func__, __LINE__);
-			    ESP_ERROR_CHECK(esp_ble_gap_config_adv_data_raw((uint8_t *)spp_adv_data, spp_adv_data[7] + 8));
+			    ESP_ERROR_CHECK(esp_ble_gap_config_adv_data_raw((uint8_t *)spp_adv_data, spp_adv_data[9] + 10));
             rMUTEX(ble_settings_mutex);
 
 			ESP_LOGI(BLE_TAG, "%s %d", __func__, __LINE__);
         	ESP_ERROR_CHECK(esp_ble_gatts_create_attr_tab(spp_gatt_db, gatts_if, SPP_IDX_NB, SPP_SVC_INST_ID));
+            ESP_ERROR_CHECK(esp_ble_gatts_create_attr_tab(elm_gatt_db, gatts_if, ELM_ATTR_COUNT, 1));
        	break;
         case ESP_GATTS_READ_EVT:
 			res = find_char_and_desr_index(p_data->read.handle);
@@ -527,7 +573,31 @@ static void gatts_profile_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_
             }
         break;
     	case ESP_GATTS_WRITE_EVT: {
-    	    res = find_char_and_desr_index(p_data->write.handle);
+            if (p_data->write.conn_id != spp_conn_id || !ble_allow_connection())
+                break;
+            if (elm_handles[ELM_CCCD] && p_data->write.handle == elm_handles[ELM_CCCD]) {
+                if (!p_data->write.is_prep && !enable_data_ntf && p_data->write.len == 2 &&
+                    p_data->write.value[1] == 0 && p_data->write.value[0] <= 1) {
+                    if (p_data->write.value[0]) {
+                        if (!ble_elm_session()) {
+                            atomic_store(&elm_claimed, true);
+                            server_callbacks.notifications_subscribed();
+                        }
+                        elm_ble_set_active(true);
+                    } else {
+                        elm_ble_set_active(false);
+                    }
+                }
+                break;
+            }
+            if (elm_handles[ELM_WRITE] && p_data->write.handle == elm_handles[ELM_WRITE]) {
+                if (!p_data->write.is_prep && ble_elm_session())
+                    elm_ble_receive(p_data->write.value, p_data->write.len);
+                break;
+            }
+            if (ble_elm_session())
+                break;
+            res = find_char_and_desr_index(p_data->write.handle);
             if(p_data->write.is_prep == false){
 				ESP_LOGI(BLE_TAG, "ESP_GATTS_WRITE_EVT : handle = %d", res);
                 if(res == SPP_IDX_SPP_COMMAND_VAL){
@@ -552,14 +622,16 @@ static void gatts_profile_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_
     	}
     	case ESP_GATTS_EXEC_WRITE_EVT:{
 			ESP_LOGI(BLE_TAG, "ESP_GATTS_EXEC_WRITE_EVT");
-    	    if(p_data->exec_write.exec_write_flag){
-    	        send_buffered_message();
-    	        free_write_buffer();
-    	    }
+            if (p_data->exec_write.conn_id != spp_conn_id)
+                break;
+            if (p_data->exec_write.exec_write_flag && !ble_elm_session() && ble_allow_connection())
+                send_buffered_message();
+            free_write_buffer();
     	    break;
     	}
     	case ESP_GATTS_MTU_EVT:
-			spp_mtu_size = p_data->mtu.mtu;
+			if (p_data->mtu.conn_id == spp_conn_id)
+                spp_mtu_size = p_data->mtu.mtu;
     	    break;
     	case ESP_GATTS_CONF_EVT:
     	    break;
@@ -573,6 +645,10 @@ static void gatts_profile_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_
         	break;
 		case ESP_GATTS_CONNECT_EVT:
             ESP_LOGI(BLE_TAG, "GATTS Connecting");
+            if (!ble_allow_connection() || spp_conn_id != 0xffff) {
+                esp_ble_gatts_close(gatts_if, p_data->connect.conn_id);
+                break;
+            }
 			spp_conn_id = p_data->connect.conn_id;
     	    spp_gatts_if = gatts_if;
             tMUTEX(ble_settings_mutex);
@@ -583,6 +659,12 @@ static void gatts_profile_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_
             ESP_LOGI(BLE_TAG, "GATTS Connected");
         	break;
 		case ESP_GATTS_DISCONNECT_EVT:
+            if (p_data->disconnect.conn_id != spp_conn_id)
+                break;
+            elm_ble_set_active(false);
+            atomic_store(&elm_claimed, false);
+            spp_conn_id = 0xffff;
+            free_write_buffer();
             tMUTEX(ble_settings_mutex);
 			    is_connected = false;
             rMUTEX(ble_settings_mutex);
@@ -609,6 +691,14 @@ static void gatts_profile_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_
 			}
 			break;
     	case ESP_GATTS_CREAT_ATTR_TAB_EVT:{
+            if (param->add_attr_tab.svc_uuid.uuid.uuid16 == elm_service_uuid) {
+                if (param->add_attr_tab.status == ESP_GATT_OK &&
+                    param->add_attr_tab.num_handle == ELM_ATTR_COUNT) {
+                    memcpy(elm_handles, param->add_attr_tab.handles, sizeof(elm_handles));
+                    ESP_ERROR_CHECK(esp_ble_gatts_start_service(elm_handles[ELM_SVC]));
+                }
+                break;
+            }
 			ESP_LOGI(BLE_TAG, "The number handle =%x",param->add_attr_tab.num_handle);
     	    if (param->add_attr_tab.status != ESP_GATT_OK){
 				ESP_LOGE(BLE_TAG, "Create attribute table failed, error code=0x%x", param->add_attr_tab.status);
@@ -665,6 +755,7 @@ void ble_server_init()
     ble_settings_mutex  = xSemaphoreCreateMutex();
     spp_send_queue      = xQueueCreate(BLE_QUEUE_SIZE, sizeof(send_message_t));
 
+    elm_ble_init(elm_notify);
     ESP_LOGI(BLE_TAG, "Init");
 }
 
@@ -673,6 +764,7 @@ void ble_server_deinit()
     bool16 didDeInit = false;
 
     if (spp_send_queue) {
+        elm_ble_deinit();
 		vQueueDelete(spp_send_queue);
 		spp_send_queue = NULL;
 		didDeInit = true;
@@ -728,6 +820,8 @@ void ble_server_start(ble_server_callbacks callbacks)
 void ble_server_stop()
 {
     if (ble_allow_run_tasks()) {
+        elm_ble_set_active(false);
+        atomic_store(&elm_claimed, false);
         ESP_LOGI(BLE_TAG, "Stopping");
 
         //set kill flag
@@ -828,9 +922,9 @@ bool16 ble_set_gap_name(char* name, bool16 set)
 		if(len <= MAX_GAP_LENGTH)
 		{
             tMUTEX(ble_settings_mutex);
-			    memset((char*)&spp_adv_data[9], 0, MAX_GAP_LENGTH);
-			    memcpy((char*)&spp_adv_data[9], name, len);
-			    spp_adv_data[7] = len+1;
+			    memset((char*)&spp_adv_data[11], 0, MAX_GAP_LENGTH);
+			    memcpy((char*)&spp_adv_data[11], name, len);
+			    spp_adv_data[9] = len+1;
 			    strcpy(ble_gap_name, name);
 			
                 if(set)

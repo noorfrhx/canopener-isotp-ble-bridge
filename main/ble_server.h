@@ -1,6 +1,7 @@
 #ifndef BLE_SERVER_H
 #define BLE_SERVER_H
 
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -90,6 +91,7 @@ void        ble_server_start(ble_server_callbacks callbacks);
 void        ble_server_stop();
 void        ble_send(uint32_t txID, uint32_t rxID, uint8_t flags, const void* src, size_t size);
 bool16      ble_connected();
+bool        ble_elm_session(void);
 uint16_t    ble_queue_spaces();
 uint16_t    ble_queue_waiting();
 void        ble_set_delay_send(uint16_t delay);

@@ -6,6 +6,7 @@ It turns the CAN Opener into an ISO-TP adapter for:
 
 - **VW_Flash** (Python, Mac/Linux/Windows) over **USB-C**: `--interface USBISOTP --usb_name /dev/cu.usbmodem…`. VW_Flash has had no Bluetooth support since 2023.
 - **SimosTools** (Android) over **Bluetooth LE**. The bridge advertises as `BLE_TO_ISOTP20`.
+- **ELM327 phone apps** over **Bluetooth LE** using the same advertised device. The ELM service supports read-only diagnostics over 11-bit, 500 kbit/s CAN.
 
 The bridge has preset links for the ECU (0x7E0/0x7E8), TCU (0x7E1/0x7E9), Haldex (0x7E5/0x7ED) and the broadcast DTC address.
 
@@ -61,6 +62,14 @@ uv run VW_Flash.py --interface USBISOTP --usb_name /dev/cu.usbmodem101 --action 
 - On macOS, VW_Flash opens the port with DTR and RTS high, which doesn't reset the chip. Opening the port with DTR and RTS low does reset it, so don't open the port with other serial tools during a session.
 - The chip's ROM still prints a short boot banner after any reset. Turning that off needs an eFuse burn, which this project doesn't do.
 - VW_Flash's DQ381 mode sends adapter setting `0x9` ("dq3xx hack"). The bridge implements it as in bri3d's `dq3xx` branch of esp32-isotp-ble-bridge: on the link it's set for (0x7E1/0x7E9 in VW_Flash), a single-frame `7F 31 xx` reply from the TCU is followed, STmin later, by a `30 00 00` flow-control Continue, which DQ381 gearboxes expect. Host test: `test/test_dq3xx.c`. Tested on a real DQ381 (0GC300011M, software 0704): a CAL-only write completed with this build. The gearbox resets without answering the final `11 01` ECU reset; that is normal for this TCU, so check identification afterwards rather than waiting for the reply.
+
+## Connecting a phone with ELM327
+
+1. Power the dongle from the OBD port and switch the ignition on. Replug it after using VW_Flash to make it advertise over Bluetooth again.
+2. In the app, choose the Bluetooth LE connection type and select `BLE_TO_ISOTP20`. In Car Scanner on iPhone, use **Settings → Adapter → Bluetooth 4.0 (LE) → Select Device**, then tap **Connect** on the main screen.
+3. Start with the generic OBD-II profile and check live data or fault codes.
+
+ELM uses service `FFF0` with notifications on `FFF1` and writes on `FFF2`. It implements a subset of ELM327 AT commands, generic OBD-II reads and selected physical UDS reads. Generic functional requests go to `7DF` and report the engine controller reply on `7E8`. For individual modules, use `AT SH` and `AT CRA` to set their 11-bit request and response IDs. The ELM service rejects coding, actuator tests, security access and clearing faults. Connect one Bluetooth app at a time.
 
 ## Known gaps
 
