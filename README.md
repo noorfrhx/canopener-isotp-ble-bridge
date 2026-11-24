@@ -9,7 +9,7 @@ It turns the CAN Opener into an ISO-TP adapter for:
 
 The bridge has preset links for the ECU (0x7E0/0x7E8), TCU (0x7E1/0x7E9), Haldex (0x7E5/0x7ED) and the broadcast DTC address.
 
-> **Status: desk-tested, not yet tested on a car.** On a real CAN Opener SE: VW_Flash connects over USB-C, 15/15 port open/close cycles without a reset, 4103-byte flash-sized packets are handled, and failed CAN sends are reported cleanly. It has since read identification, fault codes and 11 minutes of live data from a real Simos 18 ECU without dropouts; flash-sized transfers haven't been tested on a live CAN bus. Do read-only work on a car (identification, fault codes, logging) before you flash anything.
+> **Status: tested on a car (Audi S3 8V, Simos 18 ECU and DQ381 7-speed gearbox), November 2026, on firmware `a0878df`.** Over USB-C with VW_Flash it has read identification, fault codes and live data, flashed a signed stock FRF and a calibrated ECU image (all five blocks reported written, identification read back afterwards), and written a DQ381 CAL block (block transfer, checksum routine and fingerprint all passed; identification and fault codes read back clean). The car has since been driven and logged on the new ECU and gearbox calibration. That is one car and one adapter: keep a full read and the stock files before you flash anything, and start with read-only work (identification, fault codes, logging).
 
 ## What changed from the A0 version
 
@@ -60,13 +60,13 @@ uv run VW_Flash.py --interface USBISOTP --usb_name /dev/cu.usbmodem101 --action 
 
 - On macOS, VW_Flash opens the port with DTR and RTS high, which doesn't reset the chip. Opening the port with DTR and RTS low does reset it, so don't open the port with other serial tools during a session.
 - The chip's ROM still prints a short boot banner after any reset. Turning that off needs an eFuse burn, which this project doesn't do.
-- VW_Flash's DQ381 mode sends adapter setting `0x9` ("dq3xx hack"). The bridge implements it as in bri3d's `dq3xx` branch of esp32-isotp-ble-bridge: on the link it's set for (0x7E1/0x7E9 in VW_Flash), a single-frame `7F 31 xx` reply from the TCU is followed, STmin later, by a `30 00 00` flow-control Continue, which DQ381 gearboxes expect. Host test: `test/test_dq3xx.c`. **Not yet tested on a DQ381**, so a first gearbox flash is still a first.
+- VW_Flash's DQ381 mode sends adapter setting `0x9` ("dq3xx hack"). The bridge implements it as in bri3d's `dq3xx` branch of esp32-isotp-ble-bridge: on the link it's set for (0x7E1/0x7E9 in VW_Flash), a single-frame `7F 31 xx` reply from the TCU is followed, STmin later, by a `30 00 00` flow-control Continue, which DQ381 gearboxes expect. Host test: `test/test_dq3xx.c`. Tested on a real DQ381 (0GC300011M, software 0704): a CAL-only write completed with this build. The gearbox resets without answering the final `11 01` ECU reset; that is normal for this TCU, so check identification afterwards rather than waiting for the reply.
 
 ## Known gaps
 
-- **Not tested on a car or a live CAN bus with flash-sized transfers.**
-- **Single core:** the ISO-TP processing task runs above the USB tasks. It no longer busy-waits during multi-frame transfers: it blocks until the next flow-control or consecutive frame arrives, and waits out STmin with a short delay. It hasn't been measured under a real flash yet.
+- **Tested on one car only** (Audi S3 8V, Simos 18 `8V0906259J`, DQ381 `0GC300011M`). Other ECUs, gearboxes and cars are untested.
+- **Single core:** the ISO-TP processing task runs above the USB tasks. It no longer busy-waits during multi-frame transfers: it blocks until the next flow-control or consecutive frame arrives, and waits out STmin with a short delay. Full ECU and DQ381 CAL flashes have completed on it; transfer speed hasn't been measured.
 - **USB reset:** opening the port with DTR and RTS low still resets the chip during a session. Setting `usb_uart_chip_rst_dis` after the first USB packet was tried and didn't stop it on the ESP32-C5, so it was taken out.
 - **Bluetooth has no authentication.** If a phone connects before the first USB packet, the bridge sends everything to the phone instead. Unplug the bridge when you're not using it.
-- **DQ381 adapter setting** (`0x9`): implemented and host-tested, not yet tested against a real DQ381. Padding stays 0xAA; the upstream branch also switched padding to 0x55.
+- **DQ381 adapter setting** (`0x9`): host-tested and used for one real DQ381 CAL write. Padding stays 0xAA; the upstream branch also switched padding to 0x55. Full DQ381 BOOT/ASW flashes are untested.
 - **CAN 2** (OBD-II pins 3/11) is not used.
