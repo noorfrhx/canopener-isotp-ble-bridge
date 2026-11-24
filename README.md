@@ -6,7 +6,7 @@ It turns the CAN Opener into an ISO-TP adapter for:
 
 - **VW_Flash** (Python, Mac/Linux/Windows) over **USB-C**: `--interface USBISOTP --usb_name /dev/cu.usbmodem…`. VW_Flash has had no Bluetooth support since 2023.
 - **SimosTools** (Android) over **Bluetooth LE**. The bridge advertises as `BLE_TO_ISOTP20`.
-- **ELM327 phone apps** over **Bluetooth LE** using the same advertised device. The ELM service supports read-only diagnostics over 11-bit, 500 kbit/s CAN.
+- **ELM327 phone apps** over **Bluetooth LE** using the same advertised device. The default ELM service supports read-only diagnostics over 11-bit, 500 kbit/s CAN.
 
 The bridge has preset links for the ECU (0x7E0/0x7E8), TCU (0x7E1/0x7E9), Haldex (0x7E5/0x7ED) and the broadcast DTC address.
 
@@ -69,7 +69,9 @@ uv run VW_Flash.py --interface USBISOTP --usb_name /dev/cu.usbmodem101 --action 
 2. In the app, choose the Bluetooth LE connection type and select `BLE_TO_ISOTP20`. In Car Scanner on iPhone, use **Settings → Adapter → Bluetooth 4.0 (LE) → Select Device**, then tap **Connect** on the main screen.
 3. Start with the generic OBD-II profile and check live data or fault codes.
 
-ELM uses service `FFF0` with notifications on `FFF1` and writes on `FFF2`. It implements a subset of ELM327 AT commands, generic OBD-II reads and selected physical UDS reads. Generic functional requests go to `7DF` and report the engine controller reply on `7E8`. For individual modules, use `AT SH` and `AT CRA` to set their 11-bit request and response IDs. The ELM service rejects coding, actuator tests, security access and clearing faults. Connect one Bluetooth app at a time.
+ELM uses service `FFF0` with notifications on `FFF1` and writes on `FFF2`. It implements a subset of ELM327 AT commands, generic OBD-II reads and selected physical UDS reads. Generic functional requests go to `7DF` and report the engine controller reply on `7E8`. For individual modules, use `AT SH` and `AT CRA` to set their 11-bit request and response IDs. `AT CAF0` accepts an explicitly framed ISO-TP Single Frame and displays replies with protocol bytes. The bridge handles response flow control. `AT AL` enables requests longer than seven bytes in automatic formatting. Connect one Bluetooth app at a time.
+
+A custom build with `CONFIG_CANOPENER_ELM_SERVICE_WRITES=y` can send physically addressed OBD/UDS fault clears and UDS WriteDataByIdentifier. This is disabled by default because the BLE service lacks authentication. The ECU still decides whether to authorize a write. ELM support is limited to 11-bit 500 kbit/s CAN. Manual multi-frame transmit and full ELM327 command coverage remain unsupported.
 
 ## Known gaps
 

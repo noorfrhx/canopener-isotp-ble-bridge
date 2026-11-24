@@ -10,7 +10,8 @@
 
 #define ELM_VERSION "ELM327 v1.5"
 #define ELM_MAX_REPLY 255
-#define ELM_COMMAND_SIZE 32
+#define ELM_MAX_REQUEST 64
+#define ELM_COMMAND_SIZE (2 * ELM_MAX_REQUEST + 2)
 
 static StaticSemaphore_t session_mutex_storage;
 static SemaphoreHandle_t session_mutex;
@@ -19,7 +20,7 @@ static void (*send_notification)(const char *, size_t);
 
 static struct {
     bool active, headers, spaces, echo, linefeeds, automatic;
-    bool overflow;
+    bool overflow, auto_format, long_messages;
     size_t used;
     char command[ELM_COMMAND_SIZE];
     char previous[ELM_COMMAND_SIZE];
@@ -39,6 +40,8 @@ static void defaults(void)
     elm.echo = true;
     elm.linefeeds = false;
     elm.automatic = true;
+    elm.auto_format = true;
+    elm.long_messages = false;
     elm.tx_id = 0x7DF;
     elm.rx_id = 0x7E8;
     elm.timeout_ms = 200;
@@ -94,8 +97,17 @@ static const char *at_command(const char *command)
         return elm.automatic ? "AUTO, ISO 15765-4 (CAN 11/500)" : "ISO 15765-4 (CAN 11/500)";
     if (!strcmp(command, "DPN"))
         return elm.automatic ? "A6" : "6";
-    if (!strcmp(command, "SP0") || !strcmp(command, "SPA6") || !strcmp(command, "SP6")) {
-        elm.automatic = strcmp(command, "SP6") != 0;
+    if ((!strncmp(command, "SP", 2) || !strncmp(command, "TP", 2)) &&
+        (!strcmp(command + 2, "0") || !strcmp(command + 2, "A6") || !strcmp(command + 2, "6"))) {
+        elm.automatic = command[2] != '6';
+        return "OK";
+    }
+    if (!strcmp(command, "AL") || !strcmp(command, "NL")) {
+        elm.long_messages = command[0] == 'A';
+        return "OK";
+    }
+    if (!strcmp(command, "CAF0") || !strcmp(command, "CAF1")) {
+        elm.auto_format = command[3] == '1';
         return "OK";
     }
 
@@ -116,8 +128,9 @@ static const char *at_command(const char *command)
             return "OK";
         }
     }
-    if (size == 5 && !strncmp(command, "SH", 2)) {
-        int id = hex_value(command + 2, 3);
+    if ((size == 5 || (size == 8 && !strncmp(command + 2, "000", 3))) &&
+        !strncmp(command, "SH", 2)) {
+        int id = hex_value(command + size - 3, 3);
         if (id >= 0x700 && id <= 0x7E7) {
             elm.tx_id = id;
             elm.rx_id = id == 0x7DF ? 0x7E8 : id + 8;
@@ -138,14 +151,14 @@ static const char *at_command(const char *command)
     }
     // ISO-TP formatting/flow control is always enabled. The timeout is fixed
     // by AT ST, including for clients that send AT AT during initialization.
-    if (!strcmp(command, "CAF1") || !strcmp(command, "CFC1") ||
+    if (!strcmp(command, "CFC1") ||
         !strcmp(command, "FCSM0") ||
         !strcmp(command, "AT0") || !strcmp(command, "AT1") || !strcmp(command, "AT2"))
         return "OK";
     return "?";
 }
 
-static bool read_request(const uint8_t *data, size_t size)
+static bool supported_request(const uint8_t *data, size_t size)
 {
     switch (data[0]) {
     case 0x01: case 0x06: case 0x09:
@@ -158,8 +171,20 @@ static bool read_request(const uint8_t *data, size_t size)
         return elm.tx_id != 0x7DF &&
             ((size == 3 && (data[1] == 1 || data[1] == 2)) ||
              (size == 2 && data[1] == 0x0A));
+    case 0x21:
+        return elm.tx_id != 0x7DF && size == 2;
     case 0x22:
         return elm.tx_id != 0x7DF && size == 3;
+    case 0x3E:
+        return elm.tx_id != 0x7DF && size == 2 && data[1] == 0;
+#ifdef CONFIG_CANOPENER_ELM_SERVICE_WRITES
+    case 0x04:
+        return elm.tx_id != 0x7DF && size == 1;
+    case 0x14:
+        return elm.tx_id != 0x7DF && size == 4;
+    case 0x2E:
+        return elm.tx_id != 0x7DF && size >= 4;
+#endif
     default:
         return false;
     }
@@ -181,7 +206,7 @@ static void run_command(const char *command)
         return;
     }
 
-    uint8_t data[7];
+    uint8_t data[ELM_MAX_REQUEST];
     size_t length = strlen(command);
     // ELM clients can append an expected response count (one hex digit).
     // This adapter returns only the selected controller's first response.
@@ -206,7 +231,20 @@ static void run_command(const char *command)
         }
         data[i] = value;
     }
-    if (!read_request(data, size)) {
+    if (!elm.auto_format) {
+        // Unwrap one ISO-TP Single Frame. The bridge supplies any transport
+        // padding and handles flow control for the ECU's reply.
+        if (size < 2 || size > 8 || data[0] == 0 || data[0] > 7 || data[0] >= size) {
+            respond("?");
+            return;
+        }
+        size = data[0];
+        memmove(data, data + 1, size);
+    } else if (size > 7 && !elm.long_messages) {
+        respond("?");
+        return;
+    }
+    if (!supported_request(data, size)) {
         respond("?");
         return;
     }
@@ -225,7 +263,12 @@ static void run_command(const char *command)
         .flags = elm.tx_id == 0x7DF ? ISOTP_SEND_ELM_FUNCTIONAL : ISOTP_SEND_ELM_PHYSICAL,
     };
     elm.service = data[0];
-    elm.parameter_count = elm.service == 0x22 ? 2 : size > 1 ? 1 : 0;
+    if (elm.service == 0x22 || elm.service == 0x2E)
+        elm.parameter_count = 2;
+    else if (elm.service == 0x14)
+        elm.parameter_count = 0;
+    else
+        elm.parameter_count = size > 1 ? 1 : 0;
     memcpy(elm.parameters, data + 1, elm.parameter_count);
     elm.deadline_us = esp_timer_get_time() + elm.timeout_ms * 1000;
     if (bridge_send_isotp(&request) != pdTRUE) {
@@ -303,14 +346,16 @@ static void format_reply(uint32_t source, const uint8_t *data, size_t size)
     bool multi = size > 7;
     // The buffer allows five characters per payload byte, plus the first frame header.
     char *out = reply;
-    if (multi && !elm.headers)
+    bool show_pci = elm.headers || !elm.auto_format;
+    if (multi && !show_pci)
         out += snprintf(out, sizeof(reply) - (out - reply), "%03X%s", (unsigned)size, newline);
     for (size_t offset = 0, frame = 0; offset < size; frame++) {
         size_t count = multi && !frame ? 6 : 7;
         if (count > size - offset)
             count = size - offset;
-        if (elm.headers) {
+        if (elm.headers)
             out += snprintf(out, sizeof(reply) - (out - reply), "%03lX%s", (unsigned long)source, space);
+        if (show_pci) {
             unsigned pci = !multi ? size : !frame ? 0x10 : (0x20 | (frame & 0xF));
             out += snprintf(out, sizeof(reply) - (out - reply), "%02X%s", pci, space);
             if (multi && !frame)

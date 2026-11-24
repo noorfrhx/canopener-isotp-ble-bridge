@@ -1,0 +1,11 @@
+menu "CAN Opener ELM327"
+
+config CANOPENER_ELM_SERVICE_WRITES
+    bool "Allow ELM327 diagnostic writes over BLE"
+    default n
+    help
+        Enable physical-address fault clearing and UDS WriteDataByIdentifier.
+        The ELM service has no Bluetooth authentication. Leave this disabled
+        for ordinary use. The vehicle still controls diagnostic authorization.
+
+endmenu
