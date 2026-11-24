@@ -124,7 +124,7 @@ void write_password(char* data)
 #endif
 }
 
-void send_packet(uint32_t txID, uint32_t rxID, uint8_t flags, const void* src, size_t size)
+static void bridge_send_packet(uint32_t txID, uint32_t rxID, uint8_t flags, const void* src, size_t size)
 {
 	if (elm_ble_reply(txID, rxID, flags, src, size))
 		return;
@@ -225,14 +225,14 @@ static void isotp_processing_task(void *arg)
 					uint32_t time = (esp_timer_get_time() / 1000UL) & 0xFFFFFFFF;
 					uint16_t rxID = (time >> 16) & 0xFFFF;
 					uint16_t txID = time & 0xFFFF;
-					send_packet(txID, rxID, 0, payload_buf, out_size);
+					bridge_send_packet(txID, rxID, 0, payload_buf, out_size);
 					persist_allow_send(number);
 				} else {
 					tMUTEX(isotp_link_container->data_mutex);
 						uint32_t txID = link_ptr->receive_arbitration_id;
 						uint32_t rxID = link_ptr->send_arbitration_id;
 					rMUTEX(isotp_link_container->data_mutex);
-					send_packet(txID, rxID, 0, payload_buf, out_size);
+					bridge_send_packet(txID, rxID, 0, payload_buf, out_size);
 				}
 			}
 
@@ -478,7 +478,7 @@ bool16 parse_packet(ble_header_t* header, uint8_t* data)
 								{
 									uint16_t stmin = isotp_link_container->link.stmin_override;
 									ESP_LOGI(BRIDGE_TAG, "Sending stmin [%04X] from container [%02X]", stmin, i);
-									send_packet(isotp_link_container->link.receive_arbitration_id, isotp_link_container->link.send_arbitration_id, BLE_COMMAND_FLAG_SETTINGS | BRG_SETTING_ISOTP_STMIN, &stmin, sizeof(uint16_t));
+									bridge_send_packet(isotp_link_container->link.receive_arbitration_id, isotp_link_container->link.send_arbitration_id, BLE_COMMAND_FLAG_SETTINGS | BRG_SETTING_ISOTP_STMIN, &stmin, sizeof(uint16_t));
 								}
 							}
 							break;
@@ -490,7 +490,7 @@ bool16 parse_packet(ble_header_t* header, uint8_t* data)
 									header->txID == isotp_link_container->link.send_arbitration_id)
 								{
 									uint16_t dq3xx = isotp_link_container->link.dq3xx_hack;
-									send_packet(isotp_link_container->link.receive_arbitration_id, isotp_link_container->link.send_arbitration_id, BLE_COMMAND_FLAG_SETTINGS | BRG_SETTING_DQ3XX, &dq3xx, sizeof(uint16_t));
+									bridge_send_packet(isotp_link_container->link.receive_arbitration_id, isotp_link_container->link.send_arbitration_id, BLE_COMMAND_FLAG_SETTINGS | BRG_SETTING_DQ3XX, &dq3xx, sizeof(uint16_t));
 								}
 							}
 							break;
@@ -498,35 +498,35 @@ bool16 parse_packet(ble_header_t* header, uint8_t* data)
 							{
 								uint32_t color = led_getcolor();
 								ESP_LOGI(BRIDGE_TAG, "Sending color [%06X]", color);
-								send_packet(0, 0, BLE_COMMAND_FLAG_SETTINGS | BRG_SETTING_LED_COLOR, &color, sizeof(uint32_t));
+								bridge_send_packet(0, 0, BLE_COMMAND_FLAG_SETTINGS | BRG_SETTING_LED_COLOR, &color, sizeof(uint32_t));
 							}
 							break;
 						case BRG_SETTING_PERSIST_DELAY:
 							{
 								uint16_t delay = persist_get_delay();
 								ESP_LOGI(BRIDGE_TAG, "Sending persist delay [%04X]", delay);
-								send_packet(0, 0, BLE_COMMAND_FLAG_SETTINGS | BRG_SETTING_PERSIST_DELAY, &delay, sizeof(uint16_t));
+								bridge_send_packet(0, 0, BLE_COMMAND_FLAG_SETTINGS | BRG_SETTING_PERSIST_DELAY, &delay, sizeof(uint16_t));
 							}
 							break;
 						case BRG_SETTING_PERSIST_Q_DELAY:
 							{
 								uint16_t delay = persist_get_q_delay();
 								ESP_LOGI(BRIDGE_TAG, "Sending persist queue delay [%04X]", delay);
-								send_packet(0, 0, BLE_COMMAND_FLAG_SETTINGS | BRG_SETTING_PERSIST_Q_DELAY, &delay, sizeof(uint16_t));
+								bridge_send_packet(0, 0, BLE_COMMAND_FLAG_SETTINGS | BRG_SETTING_PERSIST_Q_DELAY, &delay, sizeof(uint16_t));
 							}
 							break;
 						case BRG_SETTING_BLE_SEND_DELAY:
 							{
 								uint16_t delay = ble_get_delay_send();
 								ESP_LOGI(BRIDGE_TAG, "Sending BLE send delay [%04X]", delay);
-								send_packet(0, 0, BLE_COMMAND_FLAG_SETTINGS | BRG_SETTING_BLE_SEND_DELAY, &delay, sizeof(uint16_t));
+								bridge_send_packet(0, 0, BLE_COMMAND_FLAG_SETTINGS | BRG_SETTING_BLE_SEND_DELAY, &delay, sizeof(uint16_t));
 							}
 							break;
 						case BRG_SETTING_BLE_MULTI_DELAY:
 							{
 								uint16_t delay = ble_get_delay_multi();
 								ESP_LOGI(BRIDGE_TAG, "Sending BLE send delay [%04X]", delay);
-								send_packet(0, 0, BLE_COMMAND_FLAG_SETTINGS | BRG_SETTING_BLE_MULTI_DELAY, &delay, sizeof(uint16_t));
+								bridge_send_packet(0, 0, BLE_COMMAND_FLAG_SETTINGS | BRG_SETTING_BLE_MULTI_DELAY, &delay, sizeof(uint16_t));
 							}
 							break;
 						case BRG_SETTING_GAP:
@@ -534,7 +534,7 @@ bool16 parse_packet(ble_header_t* header, uint8_t* data)
 								char str[MAX_GAP_LENGTH+1];
 								ble_get_gap_name(str);
 								uint8_t len = strlen(str);
-								send_packet(0, 0, BLE_COMMAND_FLAG_SETTINGS | BRG_SETTING_GAP, &str, len);
+								bridge_send_packet(0, 0, BLE_COMMAND_FLAG_SETTINGS | BRG_SETTING_GAP, &str, len);
 								ESP_LOGI(BRIDGE_TAG, "Set GAP [%s]", str);
 							}
 							break;
@@ -754,7 +754,7 @@ bool16 parse_packet(ble_header_t* header, uint8_t* data)
 						c = 0xFF;
 					}
 
-					send_packet(0xFF, 0xFF, 0xFF, &c, 1);
+					bridge_send_packet(0xFF, 0xFF, 0xFF, &c, 1);
 					free(str);
 				}
 				return false;
@@ -880,7 +880,7 @@ void uart_data_received(const void* src, size_t size)
 		ch_reset_uart_timer();
 		packet_received(src, size);
 #ifdef UART_ECHO
-		send_packet(0xFF, 0xFF, 0, src+sizeof(ble_header_t), size-sizeof(ble_header_t));
+		bridge_send_packet(0xFF, 0xFF, 0, src+sizeof(ble_header_t), size-sizeof(ble_header_t));
 #endif
 	}
 }
